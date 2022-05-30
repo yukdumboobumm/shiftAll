@@ -41,51 +41,41 @@ const word POT_ERROR = 10; //typical error of potentiometer readings
 const word POT_k = 34; //linear conversion factor between pot readings and gear location (in mm)
 
 //global variables
-//array for gear change distances (ie 9 gears have 8 gaps)
-//double gearDistances[NUMGEARS - 1] = {2.4, 2.5, 2.5, 2.6, 2.6, 2.6, 2.7, 2.7}; //in mm
-//word gearDistances_um[NUMGEARS - 1] = {3100, 3000, 2900, 2800, 2700, 2600, 2500, 2400}; //in um (gearDistances * 1000)
 word gearDistances_um[NUMGEARS - 1] = {3200, 2900, 3100, 2900, 2200, 2200, 2600, 2600}; //in um (gearDistances * 1000)
 word gearLocation[NUMGEARS]; //linear distance of each gear from x=0
 word gearPotLocation[NUMGEARS]; //value of potentiometer at each location
 word gearPot_min = 60;//pot gets a bit wonky below this
-word gearPot_max; //determined from MAXTRAVEL and gearPot_min
-word currentGear = 0; //what gear is the system currently in
-
-
-
-//Serial comm constants
-const byte numChars = 32; //buffer size
-char receivedChars[numChars]; // a buffer to store received data
-boolean newString = false; // boolean to determine if buffer transfer is complete
-String inString = "";    // string to hold input
+word gearPot_max; //numerically determined from MAXTRAVEL and gearPot_min
+word currentGear = 0; //what gear is the system currently in, initialized to 0 (not possible in program)
 
 //Pin definitions
 const int BUTTON_PIN = 2;//button pin
-const word BUTTON_GROUND_PIN = 3;
-const word DIR_PIN = 4;
-const word STEP_PIN = 5;
-const word SLEEP_PIN = 6;
+const word BUTTON_GROUND_PIN = 3;//
+const word DIR_PIN = 4;//stepper direction pin
+const word STEP_PIN = 5;//stepper step pin
+const word SLEEP_PIN = 6;//stepper sleep pin, inverse logic
 const int POT_PIN = A0; //potentiometer pin
-const int POT_HIGH_PIN = A1;
-const int POT_GROUND_PIN = A2;
+const int POT_HIGH_PIN = A1;//set to vcc, swap pot limits
+const int POT_GROUND_PIN = A2;//set to ground, swap pot limits
 
 //function prototypes
-void startRX(void); //begin serial transmision
-word parseString(void); //parse the data received from rx
 void runStepper(int); //run the stepper motor a linear distance
 void changeGears(int); //decide which gear we're moving to
 int buttonHoldCheck(); //is the user holding the button down? (used for differentiating
 //up and down shifts on a single button)
 void trimGear();//adjust the gear change distances
 void calibratePot();
-bool setGearLocations(int change = 0);
+bool setGearLocations(int change = 0);//set locations from gear offsets (the preffered metric). overloaded for trim functionality
+void shiftUp();
+void shiftDown();
+
 
 //interrupt prototypes
 void buttonPress_ISR();
 void wakeUp_ISR();
 
 volatile bool buttonFlag = false; //button interrupt pin, volatile for the ISR
-volatile bool powerOnFlag = false;
+volatile bool powerOnFlag = false;//legacy
 
 //interrupt debounce
 unsigned long last_time = millis();
@@ -119,7 +109,6 @@ void setup() {
   Serial.begin(9600);//begin serial comms. 9600 is pretty slow
 
   stepper.begin(RPM);
-  // stepper.setSpeedProfile(stepper.LINEAR_SPEED, MOTOR_ACCEL, MOTOR_DECEL);
   stepper.setSpeedProfile(stepper.CONSTANT_SPEED);//
   stepper.disable();
   //  digitalRead(BUTTON_PIN);
@@ -139,8 +128,6 @@ void setup() {
   DEBUG_PRINTLN(gearPot_max);
   currentGear = map(potPosition, gearPot_min, gearPot_max, 1, NUMGEARS);
   getGearInfo();
-
-  //attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonPress_ISR, FALLING);//falling edge button interrupt
 }
 
 void loop() {
@@ -151,7 +138,7 @@ void loop() {
   word secs = 0;
   inactivity = millis();
   secondCounter = millis();
-  //wait for the flag to change from an interrupt
+  //wait for the flag to change from a button press/click (in attached functions)
   while (!buttonFlag) {
     shiftButton.tick();
     if (millis() - inactivity > INACTIVITY_LIM) {
@@ -160,15 +147,15 @@ void loop() {
       sleepTime();
       secs = 0;
     }
-//    else if (millis() - secondCounter >= 1000) {
-//      secs++;
-//      DEBUG_PRINT(INACTIVITY_LIM / 1000 - secs);
-//      DEBUG_PRINT("...");
-//      secondCounter = millis();
-//    }
+    //    else if (millis() - secondCounter >= 1000) {
+    //      secs++;
+    //      DEBUG_PRINT(INACTIVITY_LIM / 1000 - secs);
+    //      DEBUG_PRINT("...");
+    //      secondCounter = millis();
+    //    }
   }
   getGearInfo();
-  buttonFlag = false; //reset our button flag and await an interrupt
+  buttonFlag = false; //reset button flag
 }
 /*FUNCTIONS*/
 
@@ -276,7 +263,6 @@ void calibratePot() {
     }
   }
   stepper.disable();
-  while (!digitalRead(BUTTON_PIN));
 }
 
 
@@ -300,8 +286,8 @@ void sleepTime() {
   buttonFlag = false;
   inactivity = millis();
 }
-//given the last used shift distance and the direction of the shift
-//trimGear will allow the user to adjust the shift distance in small increments
+
+//trimGear will adjust the location of the current gear in small increments
 void trimGear() {
   int gearDistanceIndex;
   word newGap;//the new shift distance
@@ -321,7 +307,6 @@ void trimGear() {
     if (!digitalRead(BUTTON_PIN)) {
       trimDirection = buttonHoldCheck();
       while (!digitalRead(BUTTON_PIN)) {};
-      //gearDistanceIndex = currentGear + (trimDirection - 3) / 2;
       DEBUG_PRINT("ATTEMPTING TRIM BY: ");
       DEBUG_PRINTLN(TRIMTRAVEL * trimDirection);
       allowTrim = setGearLocations(TRIMTRAVEL * trimDirection);
@@ -444,6 +429,7 @@ bool runStepperTarget(int targetPot) {
   int missedSteps;
   int distance;
   int dir = 1;
+  int moved;
   int gearDistanceIndex;
   unsigned long moveTime;
   unsigned wait_time_micros;
@@ -453,46 +439,29 @@ bool runStepperTarget(int targetPot) {
   if (initialPot > targetPot) {
     dir = -1;
   }
+  distance = initialPot - targetPot;
+  distance = abs(distance);
   gearDistanceIndex = currentGear + (dir - 3) / 2;
   DEBUG_PRINT("MOVING FROM: ");
   DEBUG_PRINTLN(initialPot);
   DEBUG_PRINT("TO TARGET: ");
   DEBUG_PRINTLN(targetPot);
   stepper.enable();
-  if (dir > 0) {
-    stepper.startMove(MAXTRIM * 2 / 13);
-    moveTime = millis();
-    while (movingFlag) {
-      wait_time_micros = stepper.nextAction();
-      if (wait_time_micros <= 0) {
-        stepper.stop();
-        movingFlag = false;
-        success = false;
-      }
-      if (wait_time_micros > 100) {
-        if (analogRead(POT_PIN) >= targetPot) {
-          stepper.stop();
-          movingFlag = false;
-        }
-      }
+  stepper.startMove(dir * MAXTRIM * 2 / 13);
+  moveTime = millis();
+  while (movingFlag) {
+    wait_time_micros = stepper.nextAction();
+    if (wait_time_micros <= 0) {
+      stepper.stop();
+      movingFlag = false;
+      success = false;
     }
-  }
-  else {
-    stepper.startMove(-(MAXTRIM * 2 / 13));
-    moveTime = millis();
-    while (movingFlag) {
-      wait_time_micros = stepper.nextAction();
-      if (wait_time_micros <= 0) {
+    if (wait_time_micros > 100) {
+      moved = analogRead(POT_PIN) - initialPot;
+      moved = abs(moved);
+      if (moved >= distance) {
         stepper.stop();
         movingFlag = false;
-        success = false;
-      }
-      if (wait_time_micros > 100) {
-        if (analogRead(POT_PIN) <= targetPot) {
-          stepper.stop();
-          movingFlag = false;
-
-        }
       }
     }
   }
@@ -509,46 +478,4 @@ bool runStepperTarget(int targetPot) {
   DEBUG_PRINT(moveTime);
   DEBUG_PRINTLN("ms");
   return success;
-}
-
-void startRX(void) {
-  static byte index = 0;
-  char endChar = '\n';
-  char rx;
-  while (Serial.available() > 0 && newString == false) {
-    rx = Serial.read();
-    if (rx != endChar) {
-      receivedChars[index] = rx;
-      index++;
-      if (index >= numChars) {
-        index = numChars - 1;
-      }
-    }
-    else {
-      receivedChars[index] = '\0';
-      index = 0;
-      newString = true;
-    }
-  }
-  return;
-}
-
-word parseString(void) {
-  int magnitude = 1;
-  int startChar = 0;
-  word value;
-  char buffer[sizeof(receivedChars)];
-  if (receivedChars[0] == 45) {
-    magnitude = -1;
-    startChar = 1;
-
-  }
-  for (int i = startChar; i < sizeof(receivedChars); i++)
-  {
-    buffer[i - startChar] = receivedChars[i];
-  }
-  value = atof(buffer);
-
-  newString = false;
-  return value;
 }
