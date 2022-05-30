@@ -14,7 +14,7 @@
 #endif
 
 //system constants
-const unsigned long INACTIVITY_LIM = 30000; // in ms = one minutes
+const unsigned long INACTIVITY_LIM = 30*1000; // in ms 
 
 
 //motor constants
@@ -25,9 +25,9 @@ const int DISTANCE_STEP_UM = 13; //linear distance in um (DISTANCE_REV * 1000)
 //bike constants
 const int NUMGEARS = 9; //number of gears in rear cassette
 const int DOWNHOLDTIME = 200; //how long to hold the button for a downshift
-const int DEBOUNCETIME = 15; //software debounce length (in ms)
-const int CLICKTIME = 50;
-const int TRIMHOLDTIME = 5000; //how long to hold a button for trim settings (ms)
+const int DEBOUNCETIME = 20; //software debounce length (in ms)
+const int CLICKTIME = 120;
+const int TRIMHOLDTIME = 3000; //how long to hold a button for trim settings (ms)
 const int TRIMDELAY = 2000; // how long to hold a button for more trim (ms)
 const int MINTRIM = 1000; //in um
 const int MAXTRIM = 3500; //in um
@@ -41,12 +41,13 @@ const word POT_ERROR = 10; //typical error of potentiometer readings
 const word POT_k = 34; //linear conversion factor between pot readings and gear location (in mm)
 
 //global variables
-word gearDistances_um[NUMGEARS - 1] = {3200, 2900, 3100, 2900, 2200, 2200, 2600, 2600}; //in um (gearDistances * 1000)
+word gearDistances_um[NUMGEARS - 1] = {3200, 2900, 2900, 3100, 2200, 2200, 2600, 2400}; //in um (gearDistances * 1000)
 word gearLocation[NUMGEARS]; //linear distance of each gear from x=0
 word gearPotLocation[NUMGEARS]; //value of potentiometer at each location
 word gearPot_min = 60;//pot gets a bit wonky below this
 word gearPot_max; //numerically determined from MAXTRAVEL and gearPot_min
 word currentGear = 0; //what gear is the system currently in, initialized to 0 (not possible in program)
+int shiftDirection = 0;
 
 //Pin definitions
 const int BUTTON_PIN = 2;//button pin
@@ -60,7 +61,7 @@ const int POT_GROUND_PIN = A2;//set to ground, swap pot limits
 
 //function prototypes
 void runStepper(int); //run the stepper motor a linear distance
-void changeGears(int); //decide which gear we're moving to
+void changeGears(); //decide which gear we're moving to
 int buttonHoldCheck(); //is the user holding the button down? (used for differentiating
 //up and down shifts on a single button)
 void trimGear();//adjust the gear change distances
@@ -98,12 +99,14 @@ void setup() {
   digitalWrite(BUTTON_GROUND_PIN, LOW);
   digitalWrite(POT_GROUND_PIN, LOW);
   digitalWrite(POT_HIGH_PIN, HIGH);
+
   shiftButton.attachClick(shiftUp);
-  //shiftButton.attachDoubleClick(shiftDown);
-  shiftButton.attachLongPressStart(shiftDown);
+  shiftButton.attachDoubleClick(shiftDown);
+  shiftButton.attachLongPressStop(trimGear);
+  
   shiftButton.setDebounceTicks(DEBOUNCETIME);
   shiftButton.setClickTicks(CLICKTIME);
-  shiftButton.setPressTicks(DOWNHOLDTIME);
+  shiftButton.setPressTicks(TRIMHOLDTIME);
 
 
   Serial.begin(9600);//begin serial comms. 9600 is pretty slow
@@ -154,6 +157,7 @@ void loop() {
     //      secondCounter = millis();
     //    }
   }
+  changeGears();
   getGearInfo();
   buttonFlag = false; //reset button flag
 }
@@ -161,11 +165,11 @@ void loop() {
 
 void shiftUp() {
   buttonFlag = true;
-  changeGears(1);
+  shiftDirection = 1;
 }
 void shiftDown() {
   buttonFlag = true;
-  changeGears(-1);
+  shiftDirection = -1;
 }
 
 bool setGearLocations(int change) {
@@ -297,16 +301,19 @@ void trimGear() {
   bool allowTrim;
   unsigned long secondCounter;
   word secs = 0;
+  buttonFlag = false;
+  //while (!shiftButton.isIdle()){};
+  
+  shiftButton.reset();
   DEBUG_PRINTLN("TRIM MODE");
-  while (!digitalRead(BUTTON_PIN)) {};
   inactivity = millis();
   secondCounter = millis();
   DEBUG_PRINT("USE BUTTON TO TRIM GEAR: ");
   DEBUG_PRINTLN(currentGear);
   while (activeTrimFlag) {
-    if (!digitalRead(BUTTON_PIN)) {
-      trimDirection = buttonHoldCheck();
-      while (!digitalRead(BUTTON_PIN)) {};
+    shiftButton.tick();
+    if (buttonFlag) {
+      trimDirection = shiftDirection;
       DEBUG_PRINT("ATTEMPTING TRIM BY: ");
       DEBUG_PRINTLN(TRIMTRAVEL * trimDirection);
       allowTrim = setGearLocations(TRIMTRAVEL * trimDirection);
@@ -326,28 +333,29 @@ void trimGear() {
       inactivity = millis();
       secondCounter = millis();
       secs = 0;
+      buttonFlag = false;
     }
-    else if (millis() - inactivity > TRIMHOLDTIME) {
+    else if (millis() - inactivity > TRIMHOLDTIME*2) {
       DEBUG_PRINTLN("EXITING TRIM");
       delay(100);
       activeTrimFlag = false;
     }
     else if (millis() - secondCounter >= 1000) {
       secs++;
-      DEBUG_PRINT(TRIMHOLDTIME / 1000 - secs);
+      DEBUG_PRINT(TRIMHOLDTIME*2 / 1000 - secs);
       DEBUG_PRINT("...");
       secondCounter = millis();
     }
   }
 }
 
-void changeGears(int gearDirection) {
+void changeGears() {
   word newGear;//what gear does user want to move to?
   int gearDistanceIndex;//what gap do we have to cross to get there (what index of gear distances array)
   bool success = true;
 
-  newGear = currentGear + gearDirection;
-  gearDistanceIndex = currentGear + (gearDirection - 3) / 2;
+  newGear = currentGear + shiftDirection;
+  gearDistanceIndex = currentGear + (shiftDirection - 3) / 2;
   DEBUG_PRINT(currentGear);
   DEBUG_PRINT('\t');
   DEBUG_PRINT(newGear);
