@@ -14,7 +14,7 @@
 #endif
 
 //system constants
-const unsigned long INACTIVITY_LIM = 30*1000; // in ms 
+const unsigned long INACTIVITY_LIM = 30 * 1000; // in ms
 
 
 //motor constants
@@ -48,6 +48,7 @@ word gearPot_min = 60;//pot gets a bit wonky below this
 word gearPot_max; //numerically determined from MAXTRAVEL and gearPot_min
 word currentGear = 0; //what gear is the system currently in, initialized to 0 (not possible in program)
 int shiftDirection = 0;
+bool buttonFlag = false; 
 
 //Pin definitions
 const int BUTTON_PIN = 2;//button pin
@@ -71,16 +72,10 @@ void shiftUp();
 void shiftDown();
 
 
-//interrupt prototypes
-void buttonPress_ISR();
 void wakeUp_ISR();
 
-volatile bool buttonFlag = false; //button interrupt pin, volatile for the ISR
-volatile bool powerOnFlag = false;//legacy
 
-//interrupt debounce
-unsigned long last_time = millis();
-unsigned long inactivity = millis();
+
 // create an instance of the stepper class, specifying
 // the number of steps of the motor and the pins it's
 // attached to
@@ -90,7 +85,7 @@ OneButton shiftButton = OneButton(BUTTON_PIN, true, true);
 void setup() {
   word potPosition;   //variable to track the potentiometer reading
 
-  pinMode(BUTTON_PIN, INPUT_PULLUP);//shift down button
+  //pinMode(BUTTON_PIN, INPUT_PULLUP);//shift button
   pinMode(BUTTON_GROUND_PIN, OUTPUT);
   pinMode(POT_PIN, INPUT); //potentiometer
   pinMode(POT_GROUND_PIN, OUTPUT); //potentiometer
@@ -103,7 +98,7 @@ void setup() {
   shiftButton.attachClick(shiftUp);
   shiftButton.attachDoubleClick(shiftDown);
   shiftButton.attachLongPressStop(trimGear);
-  
+
   shiftButton.setDebounceTicks(DEBOUNCETIME);
   shiftButton.setClickTicks(CLICKTIME);
   shiftButton.setPressTicks(TRIMHOLDTIME);
@@ -134,13 +129,10 @@ void setup() {
 }
 
 void loop() {
-  int gearDirection; //moving up or down the cassette: +1 for up (1->2); -1 for down (4->3)
-  int gearArrayIndex;//each element represents the distance to an adjacent gear
-  unsigned long buttonHoldTime;
-  unsigned long secondCounter;
+  //unsigned long secondCounter;= millis()
+  unsigned long inactivity= millis();
   word secs = 0;
-  inactivity = millis();
-  secondCounter = millis();
+
   //wait for the flag to change from a button press/click (in attached functions)
   while (!buttonFlag) {
     shiftButton.tick();
@@ -149,6 +141,7 @@ void loop() {
       delay(100);
       sleepTime();
       secs = 0;
+      inactivity = millis();
     }
     //    else if (millis() - secondCounter >= 1000) {
     //      secs++;
@@ -286,9 +279,7 @@ void sleepTime() {
   sei();
   sleep_cpu();
   DEBUG_PRINTLN("WAKE UP!");
-  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonPress_ISR, FALLING);//falling edge button interrupt
   buttonFlag = false;
-  inactivity = millis();
 }
 
 //trimGear will adjust the location of the current gear in small increments
@@ -300,10 +291,9 @@ void trimGear() {
   bool activeTrimFlag = true;
   bool allowTrim;
   unsigned long secondCounter;
+  unsigned long inactivity;
   word secs = 0;
   buttonFlag = false;
-  //while (!shiftButton.isIdle()){};
-  
   shiftButton.reset();
   DEBUG_PRINTLN("TRIM MODE");
   inactivity = millis();
@@ -335,14 +325,14 @@ void trimGear() {
       secs = 0;
       buttonFlag = false;
     }
-    else if (millis() - inactivity > TRIMHOLDTIME*2) {
+    else if (millis() - inactivity > TRIMHOLDTIME * 2) {
       DEBUG_PRINTLN("EXITING TRIM");
       delay(100);
       activeTrimFlag = false;
     }
     else if (millis() - secondCounter >= 1000) {
       secs++;
-      DEBUG_PRINT(TRIMHOLDTIME*2 / 1000 - secs);
+      DEBUG_PRINT(TRIMHOLDTIME * 2 / 1000 - secs);
       DEBUG_PRINT("...");
       secondCounter = millis();
     }
@@ -388,29 +378,6 @@ void changeGears() {
   }
   return;
 
-}
-
-int buttonHoldCheck() {
-  unsigned long buttonHoldTime;//if button is being held, keep track of length
-  int gearDirection = 1;
-  buttonHoldTime = millis();//listen for a held button
-  //wait for button to be released. If hold time is greater than DOWNHOLDTIME, consider it intentional
-  while (!digitalRead(BUTTON_PIN)) {
-    if (millis() - buttonHoldTime > DOWNHOLDTIME) {
-      gearDirection = -1;
-      break;
-    }
-  }
-  return gearDirection;
-}
-
-void buttonPress_ISR() {
-  //software debounce
-  unsigned long this_time = millis();
-  if (this_time - last_time > DEBOUNCETIME) {
-    buttonFlag = true;
-  }
-  last_time = this_time;
 }
 
 //given a distance in micrometers
