@@ -21,12 +21,13 @@ const unsigned long INACTIVITY_LIM = 30 * 1000; // in ms
 const int STEPS = 48; //number of steps per rev (motor specific)
 const int RPM = 500; //RPM
 const int DISTANCE_STEP_UM = 13; //linear distance in um (DISTANCE_REV * 1000)
+const int STEPPER_NATIVE_DIR = -1; //stepper moves SND * steps if given a positive number of steps, depends on wiring
 
 //bike constants
 const int NUMGEARS = 9; //number of gears in rear cassette
 const int DOWNHOLDTIME = 200; //how long to hold the button for a downshift
 const int DEBOUNCETIME = 20; //software debounce length (in ms)
-const int CLICKTIME = 120;
+const int CLICKTIME = 50;
 const int TRIMHOLDTIME = 3000; //how long to hold a button for trim settings (ms)
 const int TRIMDELAY = 2000; // how long to hold a button for more trim (ms)
 const int MINTRIM = 1000; //in um
@@ -48,17 +49,20 @@ word gearPot_min = 60;//pot gets a bit wonky below this
 word gearPot_max; //numerically determined from MAXTRAVEL and gearPot_min
 word currentGear = 0; //what gear is the system currently in, initialized to 0 (not possible in program)
 int shiftDirection = 0;
-bool buttonFlag = false; 
+bool buttonFlag = false;
 
 //Pin definitions
-const int BUTTON_PIN = 2;//button pin
-const word BUTTON_GROUND_PIN = 3;//
-const word DIR_PIN = 4;//stepper direction pin
-const word STEP_PIN = 5;//stepper step pin
-const word SLEEP_PIN = 6;//stepper sleep pin, inverse logic
-const int POT_PIN = A0; //potentiometer pin
-const int POT_HIGH_PIN = A1;//set to vcc, swap pot limits
-const int POT_GROUND_PIN = A2;//set to ground, swap pot limits
+const int UPBUTTON_PIN = 2;//button pin
+const int DOWNBUTTON_PIN = 3;//button pin
+const word BUTTON_GROUND_PIN = 4;//
+const word THREEVOLTPOWER_PIN = 5;
+const word TWELVEVOLTPOWER_PIN = 6;
+const word SLEEP_PIN = 7;//stepper sleep pin, inverse logic
+const word STEP_PIN = 8;//stepper step pin
+const word DIR_PIN = 9;//stepper direction pin
+const int POT_PIN = A1; //potentiometer pin
+const int POT_HIGH_PIN = A2;//set to vcc, swap pot limits
+const int POT_GROUND_PIN = A3;//set to ground, swap pot limits
 
 //function prototypes
 void runStepper(int); //run the stepper motor a linear distance
@@ -80,7 +84,8 @@ void wakeUp_ISR();
 // the number of steps of the motor and the pins it's
 // attached to
 A4988 stepper(STEPS, DIR_PIN, STEP_PIN, SLEEP_PIN);//, MODE0, MODE1, MODE2);
-OneButton shiftButton = OneButton(BUTTON_PIN, true, true);
+OneButton shiftUpButton = OneButton(UPBUTTON_PIN, true, true);
+OneButton shiftDownButton = OneButton(DOWNBUTTON_PIN, true, true);
 
 void setup() {
   word potPosition;   //variable to track the potentiometer reading
@@ -90,25 +95,34 @@ void setup() {
   pinMode(POT_PIN, INPUT); //potentiometer
   pinMode(POT_GROUND_PIN, OUTPUT); //potentiometer
   pinMode(POT_HIGH_PIN, OUTPUT); //potentiometer
+  pinMode(THREEVOLTPOWER_PIN, OUTPUT);
+  pinMode(TWELVEVOLTPOWER_PIN, OUTPUT);
+
+  digitalWrite(THREEVOLTPOWER_PIN, HIGH);
+  digitalWrite(TWELVEVOLTPOWER_PIN, HIGH);
 
   digitalWrite(BUTTON_GROUND_PIN, LOW);
   digitalWrite(POT_GROUND_PIN, LOW);
   digitalWrite(POT_HIGH_PIN, HIGH);
 
-  shiftButton.attachClick(shiftUp);
-  shiftButton.attachDoubleClick(shiftDown);
-  shiftButton.attachLongPressStop(trimGear);
+  shiftUpButton.attachClick(shiftUp);
+  shiftDownButton.attachClick(shiftDown);
+  //shiftButton.attachDoubleClick(shiftDown);
+  //shiftButton.attachLongPressStop(trimGear);
 
-  shiftButton.setDebounceTicks(DEBOUNCETIME);
-  shiftButton.setClickTicks(CLICKTIME);
-  shiftButton.setPressTicks(TRIMHOLDTIME);
+  shiftUpButton.setDebounceTicks(DEBOUNCETIME);
+  shiftUpButton.setClickTicks(CLICKTIME);
+  shiftDownButton.setDebounceTicks(DEBOUNCETIME);
+  shiftDownButton.setClickTicks(CLICKTIME);
+  //shiftButton.setPressTicks(TRIMHOLDTIME);
 
 
   Serial.begin(9600);//begin serial comms. 9600 is pretty slow
 
   stepper.begin(RPM);
   stepper.setSpeedProfile(stepper.CONSTANT_SPEED);//
-  stepper.disable();
+  stepper.setEnableActiveState(LOW);
+  disableMotor();
   //  digitalRead(BUTTON_PIN);
   //  delay(500);
   //  if (!digitalRead(BUTTON_PIN)) {
@@ -130,12 +144,13 @@ void setup() {
 
 void loop() {
   //unsigned long secondCounter;= millis()
-  unsigned long inactivity= millis();
+  unsigned long inactivity = millis();
   word secs = 0;
 
   //wait for the flag to change from a button press/click (in attached functions)
   while (!buttonFlag) {
-    shiftButton.tick();
+    shiftUpButton.tick();
+    shiftDownButton.tick();
     if (millis() - inactivity > INACTIVITY_LIM) {
       DEBUG_PRINTLN("\nSLEEP TIME!");
       delay(100);
@@ -163,6 +178,18 @@ void shiftUp() {
 void shiftDown() {
   buttonFlag = true;
   shiftDirection = -1;
+}
+
+void enableMotor() {
+  digitalWrite(TWELVEVOLTPOWER_PIN, HIGH);
+  delay(5);
+  stepper.enable();
+}
+
+void disableMotor() {
+  stepper.disable();
+  digitalWrite(TWELVEVOLTPOWER_PIN, LOW);
+  delay(5);
 }
 
 bool setGearLocations(int change) {
@@ -245,8 +272,8 @@ void calibratePot() {
   }
   else dir = -1;
   DEBUG_PRINTLN("RUNNING TO MIN");
-  stepper.enable();
-  stepper.startMove(dir * MAXTRAVEL / DISTANCE_STEP_UM);
+  enableMotor();
+  stepper.startMove(STEPPER_NATIVE_DIR * dir * MAXTRAVEL / DISTANCE_STEP_UM);
   while (1) {
     wait_time_micros = stepper.nextAction();
     if (wait_time_micros <= 0) {
@@ -259,19 +286,22 @@ void calibratePot() {
       }
     }
   }
-  stepper.disable();
+  disableMotor();
+
 }
 
 
 void wakeUp_ISR() {
-  detachInterrupt(digitalPinToInterrupt(BUTTON_PIN));
+  detachInterrupt(digitalPinToInterrupt(UPBUTTON_PIN));
+  detachInterrupt(digitalPinToInterrupt(DOWNBUTTON_PIN));
   sleep_disable();//AVR function
 }
 
 
 void sleepTime() {
-  detachInterrupt(digitalPinToInterrupt(BUTTON_PIN));
-  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), wakeUp_ISR, LOW);//low side button interrupt
+  //detachInterrupt(digitalPinToInterrupt(BUTTON_PIN));
+  attachInterrupt(digitalPinToInterrupt(UPBUTTON_PIN), wakeUp_ISR, LOW);//low side button interrupt
+  attachInterrupt(digitalPinToInterrupt(DOWNBUTTON_PIN), wakeUp_ISR, LOW);
   sleep_enable();
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
   cli();
@@ -294,14 +324,16 @@ void trimGear() {
   unsigned long inactivity;
   word secs = 0;
   buttonFlag = false;
-  shiftButton.reset();
+  shiftUpButton.reset();
+  shiftDownButton.reset();
   DEBUG_PRINTLN("TRIM MODE");
   inactivity = millis();
   secondCounter = millis();
   DEBUG_PRINT("USE BUTTON TO TRIM GEAR: ");
   DEBUG_PRINTLN(currentGear);
   while (activeTrimFlag) {
-    shiftButton.tick();
+    shiftUpButton.tick();
+    shiftDownButton.tick();
     if (buttonFlag) {
       trimDirection = shiftDirection;
       DEBUG_PRINT("ATTEMPTING TRIM BY: ");
@@ -391,9 +423,9 @@ void runStepper(int distance) {
     int dir = (distance > 0) - (distance < 0);
     numSteps += 1 * dir;
   }
-  stepper.enable();
+  enableMotor();
   stepper.move(numSteps);
-  stepper.disable();
+  disableMotor();
   DEBUG_PRINT("Steps Taken: ");
   DEBUG_PRINTLN(numSteps);
 
@@ -421,8 +453,8 @@ bool runStepperTarget(int targetPot) {
   DEBUG_PRINTLN(initialPot);
   DEBUG_PRINT("TO TARGET: ");
   DEBUG_PRINTLN(targetPot);
-  stepper.enable();
-  stepper.startMove(dir * MAXTRIM * 2 / 13);
+  enableMotor();
+  stepper.startMove(STEPPER_NATIVE_DIR * dir * MAXTRIM * 2 / 13);
   moveTime = millis();
   while (movingFlag) {
     wait_time_micros = stepper.nextAction();
@@ -440,7 +472,7 @@ bool runStepperTarget(int targetPot) {
       }
     }
   }
-  stepper.disable();
+  disableMotor();
   distance = gearDistances_um[gearDistanceIndex];
   missedSteps = stepper.getStepsCompleted() - (distance / 13);
   DEBUG_PRINTLN("TARGET ACQUIRED");
