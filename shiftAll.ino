@@ -1,6 +1,6 @@
-//#include <Stepper.h>
 #include <A4988.h>
 #include <avr/sleep.h>
+#include <EEPROM.h>
 #include <OneButton.h>
 
 #define DEBUG 1
@@ -14,24 +14,23 @@
 #endif
 
 //system constants
-const unsigned long INACTIVITY_LIM = 30 * 1000; // in ms
-
+const unsigned long INACTIVITY_LIM = 5 * 1000; // in ms
 
 //motor constants
 const int STEPS = 48; //number of steps per rev (motor specific)
-const int RPM = 500; //RPM
+const int RPM = 600; //RPM
 const int DISTANCE_STEP_UM = 13; //linear distance in um (DISTANCE_REV * 1000)
-const int STEPPER_NATIVE_DIR = -1; //stepper moves SND * steps if given a positive number of steps, depends on wiring
+const int STEPPER_NATIVE_DIR = -1; //which direction does stepper move for positive numbers? depends on wiring
 
 //bike constants
 const int NUMGEARS = 9; //number of gears in rear cassette
 const int DOWNHOLDTIME = 200; //how long to hold the button for a downshift
 const int DEBOUNCETIME = 20; //software debounce length (in ms)
-const int CLICKTIME = 50;
+const int CLICKTIME = 120;
 const int TRIMHOLDTIME = 3000; //how long to hold a button for trim settings (ms)
 const int TRIMDELAY = 2000; // how long to hold a button for more trim (ms)
-const int MINTRIM = 1000; //in um
-const int MAXTRIM = 3500; //in um
+const int MINTRIM = 1500; //in um
+const int MAXTRIM = 3750; //in um
 const int MAXTRAVEL = 30000;//in um stepper specific
 const int TRIMTRAVEL = 250; //in um
 
@@ -42,14 +41,17 @@ const word POT_ERROR = 10; //typical error of potentiometer readings
 const word POT_k = 34; //linear conversion factor between pot readings and gear location (in mm)
 
 //global variables
-word gearDistances_um[NUMGEARS - 1] = {3200, 2900, 2900, 3100, 2200, 2200, 2600, 2400}; //in um (gearDistances * 1000)
+//word gearDistances_um[NUMGEARS - 1] = {3200, 2900, 2900, 3100, 2200, 2200, 2600, 2400}; //in um (gearDistances * 1000)
+word gearDistances_um[NUMGEARS - 1];
 word gearLocation[NUMGEARS]; //linear distance of each gear from x=0
 word gearPotLocation[NUMGEARS]; //value of potentiometer at each location
 word gearPot_min = 60;//pot gets a bit wonky below this
 word gearPot_max; //numerically determined from MAXTRAVEL and gearPot_min
 word currentGear = 0; //what gear is the system currently in, initialized to 0 (not possible in program)
+word gearChanges = 0;
 int shiftDirection = 0;
 bool buttonFlag = false;
+
 
 //Pin definitions
 const int UPBUTTON_PIN = 2;//button pin
@@ -66,16 +68,12 @@ const int POT_GROUND_PIN = A3;//set to ground, swap pot limits
 
 //function prototypes
 void runStepper(int); //run the stepper motor a linear distance
-void changeGears(); //decide which gear we're moving to
-int buttonHoldCheck(); //is the user holding the button down? (used for differentiating
-//up and down shifts on a single button)
+bool changeGears(); //decide which gear we're moving to
 void trimGear();//adjust the gear change distances
 void calibratePot();
 bool setGearLocations(int change = 0);//set locations from gear offsets (the preffered metric). overloaded for trim functionality
 void shiftUp();
 void shiftDown();
-
-
 void wakeUp_ISR();
 
 
@@ -106,15 +104,20 @@ void setup() {
   digitalWrite(POT_HIGH_PIN, HIGH);
 
   shiftUpButton.attachClick(shiftUp);
+  shiftUpButton.attachDoubleClick(shiftUp);
+  shiftUpButton.attachMultiClick(shiftUp);
+  shiftUpButton.attachLongPressStop(trimGear);
   shiftDownButton.attachClick(shiftDown);
-  //shiftButton.attachDoubleClick(shiftDown);
-  //shiftButton.attachLongPressStop(trimGear);
+  shiftDownButton.attachDoubleClick(shiftDown);
+  shiftDownButton.attachMultiClick(shiftDown);
+  shiftDownButton.attachLongPressStop(trimGear);
 
   shiftUpButton.setDebounceTicks(DEBOUNCETIME);
   shiftUpButton.setClickTicks(CLICKTIME);
+  shiftUpButton.setPressTicks(TRIMHOLDTIME);
   shiftDownButton.setDebounceTicks(DEBOUNCETIME);
   shiftDownButton.setClickTicks(CLICKTIME);
-  //shiftButton.setPressTicks(TRIMHOLDTIME);
+  shiftDownButton.setPressTicks(TRIMHOLDTIME);
 
 
   Serial.begin(9600);//begin serial comms. 9600 is pretty slow
@@ -128,6 +131,7 @@ void setup() {
   //  if (!digitalRead(BUTTON_PIN)) {
   //    calibratePot();
   //  }
+  readMemory();
   setGearLocations();
   analogRead(POT_PIN);//read off capacitance
   potPosition = analogRead(POT_PIN);
@@ -143,39 +147,61 @@ void setup() {
 }
 
 void loop() {
-  //unsigned long secondCounter;= millis()
+  unsigned long secondCounter = millis();
   unsigned long inactivity = millis();
   word secs = 0;
-
   //wait for the flag to change from a button press/click (in attached functions)
   while (!buttonFlag) {
     shiftUpButton.tick();
     shiftDownButton.tick();
     if (millis() - inactivity > INACTIVITY_LIM) {
       DEBUG_PRINTLN("\nSLEEP TIME!");
-      delay(100);
       sleepTime();
       secs = 0;
       inactivity = millis();
     }
-    //    else if (millis() - secondCounter >= 1000) {
-    //      secs++;
-    //      DEBUG_PRINT(INACTIVITY_LIM / 1000 - secs);
-    //      DEBUG_PRINT("...");
-    //      secondCounter = millis();
-    //    }
+    else if (millis() - secondCounter >= 1000) {
+      secs++;
+      DEBUG_PRINT(INACTIVITY_LIM / 1000 - secs);
+      DEBUG_PRINT("...");
+      secondCounter = millis();
+    }
+    else if (!shiftUpButton.isIdle() || !shiftDownButton.isIdle()) {
+      secs = 0;
+      secondCounter = millis();
+      inactivity = millis();
+    }
   }
-  changeGears();
+  DEBUG_PRINT("\nBUTTON CLICKED: ");
+  DEBUG_PRINT(gearChanges);
+  DEBUG_PRINTLN(" TIMES");
+  for (int i = gearChanges; i > 0; i--) {
+    if (!changeGears()) break;
+  }
   getGearInfo();
   buttonFlag = false; //reset button flag
 }
 /*FUNCTIONS*/
 
 void shiftUp() {
+  gearChanges = shiftUpButton.getNumberClicks();
+  for (int i = gearChanges; i > 0; i--) {
+    if (gearChanges + currentGear > NUMGEARS) {
+      gearChanges--;
+    }
+    else break;
+  }
   buttonFlag = true;
   shiftDirection = 1;
 }
 void shiftDown() {
+  gearChanges = shiftDownButton.getNumberClicks();
+  for (int i = gearChanges; i > 0; i--) {
+    if ((int)(currentGear - gearChanges) < 1) {
+      gearChanges--;
+    }
+    else break;
+  }
   buttonFlag = true;
   shiftDirection = -1;
 }
@@ -190,6 +216,46 @@ void disableMotor() {
   stepper.disable();
   digitalWrite(TWELVEVOLTPOWER_PIN, LOW);
   delay(5);
+}
+
+void readMemory() {
+  word eepromValue;
+  for (int i = 0; i < NUMGEARS - 1; i++) {
+    eepromValue = EEPROM.read(i) * 100 / 2;
+    if (eepromValue >= MINTRIM && eepromValue <= MAXTRIM) {
+      DEBUG_PRINT("VALID VALUE, LOADING FROM EEPROM: ");
+      gearDistances_um[i] = eepromValue;
+    }
+    else {
+      DEBUG_PRINT("ERROR WITH EEPROM -- ADDRESS: ");
+      DEBUG_PRINT(i);
+      DEBUG_PRINT(" VALUE: ");
+      DEBUG_PRINTLN(eepromValue);
+      DEBUG_PRINT("RESTORING DEFAULT VALUE ");
+      EEPROM.update(i, 2500 * 2 / 100);
+      gearDistances_um[i] = 2500;
+    }
+    DEBUG_PRINTLN(gearDistances_um[i]);
+  }
+}
+
+void updateEEPROM(word address) {
+  word eepromValue = EEPROM.read(address) * 100 / 2;
+  DEBUG_PRINT("EEPROM ADDRESS: ");
+  DEBUG_PRINT(address);
+  DEBUG_PRINT(" WITH VALUE: ");
+  DEBUG_PRINTLN(eepromValue);
+  if (gearDistances_um[address] == eepromValue) {
+    DEBUG_PRINT("IS THE SAME AS ");
+    DEBUG_PRINTLN(gearDistances_um[address]);
+    DEBUG_PRINTLN("NO CHANGE MADE");
+  }
+  else {
+    DEBUG_PRINT("IS DIFFERENT THAN ");
+    DEBUG_PRINTLN(gearDistances_um[address]);
+    DEBUG_PRINTLN("UPDATING EEPROM...");
+    EEPROM.update(address, gearDistances_um[address] * 2 / 100);
+  }
 }
 
 bool setGearLocations(int change) {
@@ -299,7 +365,9 @@ void wakeUp_ISR() {
 
 
 void sleepTime() {
-  //detachInterrupt(digitalPinToInterrupt(BUTTON_PIN));
+  // wait for transmit buffer to empty
+  Serial.flush ();
+  while ((UCSR0A & _BV (TXC0)) == 0) {};
   attachInterrupt(digitalPinToInterrupt(UPBUTTON_PIN), wakeUp_ISR, LOW);//low side button interrupt
   attachInterrupt(digitalPinToInterrupt(DOWNBUTTON_PIN), wakeUp_ISR, LOW);
   sleep_enable();
@@ -357,31 +425,34 @@ void trimGear() {
       secs = 0;
       buttonFlag = false;
     }
-    else if (millis() - inactivity > TRIMHOLDTIME * 2) {
+    else if (millis() - inactivity > 10000) {
       DEBUG_PRINTLN("EXITING TRIM");
-      delay(100);
+      delay(1000);
       activeTrimFlag = false;
     }
     else if (millis() - secondCounter >= 1000) {
       secs++;
-      DEBUG_PRINT(TRIMHOLDTIME * 2 / 1000 - secs);
+      DEBUG_PRINT(10 - secs);
       DEBUG_PRINT("...");
       secondCounter = millis();
     }
   }
+  updateEEPROM(currentGear - 2);
+  getGearInfo();
 }
 
-void changeGears() {
+bool changeGears() {
   word newGear;//what gear does user want to move to?
   int gearDistanceIndex;//what gap do we have to cross to get there (what index of gear distances array)
   bool success = true;
 
   newGear = currentGear + shiftDirection;
   gearDistanceIndex = currentGear + (shiftDirection - 3) / 2;
+  DEBUG_PRINT("CURRENT GEAR: ");
   DEBUG_PRINT(currentGear);
-  DEBUG_PRINT('\t');
+  DEBUG_PRINT(", NEW GEAR: ");
   DEBUG_PRINT(newGear);
-  DEBUG_PRINT('\t');
+  DEBUG_PRINT(", DISTANCE INDEX: ");
   DEBUG_PRINTLN(gearDistanceIndex);
 
   if (newGear > 0 && newGear <= NUMGEARS) {
@@ -401,14 +472,14 @@ void changeGears() {
       DEBUG_PRINTLN("GEAR CHANGE FAILED");
       DEBUG_PRINT("MOVING BACK TO: ");
       DEBUG_PRINTLN(gearPotLocation[currentGear - 1]);
-      success = runStepperTarget(gearPotLocation[currentGear - 1]);
+      runStepperTarget(gearPotLocation[currentGear - 1]);//i don't take any action if this fails. Probably need to...
     }
   }
   else {
     DEBUG_PRINTLN("End of cassette");
     delay(DEBOUNCETIME);
   }
-  return;
+  return success;
 
 }
 
