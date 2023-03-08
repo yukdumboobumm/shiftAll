@@ -4,7 +4,7 @@
 #include <OneButton.h> //software debounce library
 
 //useful way to easily toggle my debug print statements
-#define DEBUG false 
+#define DEBUG true 
 
 #ifdef DEBUG
 #define DEBUG_PRINT(x) Serial.print(x)
@@ -21,7 +21,7 @@ const unsigned long INACTIVITY_LIM = 5 * 1000;  // threshold for user inactivity
 const int STEPS = 48;               //number of steps per rev (motor specific)
 const int RPM = 600;                //RPM, this is about the limit I found for this motor / torque reqs
 const int DISTANCE_STEP_UM = 13;    //linear distance per step, in um
-const int STEPPER_NATIVE_DIR = -1;  //which direction does stepper move given a positive number? depends on wiring
+const int STEPPER_NATIVE_DIR = 1;  //which direction does stepper move given a positive number? depends on wiring
 
 //bike constants
 const int NUMGEARS = 9;        //number of gears in rear cassette
@@ -40,17 +40,17 @@ const unsigned int POT_ERROR = 10;  //typical error of potentiometer readings
 const unsigned int POT_k = 34;      //linear conversion factor between pot readings and gear location, emprirical (in mm)
 
 //Pin definitions
-const int UPBUTTON_PIN = 2;        //button pin on interrupt pin 0
-const int DOWNBUTTON_PIN = 3;      //button pin on interrupt pin 1
+const int UPBUTTON_PIN = 3;        //button pin on interrupt pin 0
+const int DOWNBUTTON_PIN = 2;      //button pin on interrupt pin 1
 const unsigned int BUTTON_GROUND_PIN = 4;  //dynamic ground pin for the button. made connectorizing easier but can be reclaimed if needed.
 const unsigned int THREEVOLTPOWER_PIN = 5; //tied to en on 3V regulator
 const unsigned int TWELVEVOLTPOWER_PIN = 6; //tied to en on 12V regulator
 const unsigned int SLEEP_PIN = 7;       //stepper sleep pin, inverse logic
 const unsigned int STEP_PIN = 8;        //stepper step pin
 const unsigned int DIR_PIN = 9;         //stepper direction pin
-const int POT_PIN = A1;         //potentiometer pin
-const int POT_HIGH_PIN = A2;    //set to vcc, can swap pot limits, can be reclaimed
-const int POT_GROUND_PIN = A3;  //set to ground, can swap pot limits, can be reclaimed
+const int POT_PIN = A3;         //potentiometer pin
+const int POT_HIGH_PIN = A1;    //set to vcc, can swap pot limits, can be reclaimed
+const int POT_GROUND_PIN = A2;  //set to ground, can swap pot limits, can be reclaimed
 
 //global variables
 //unsigned int gearDistances_um[NUMGEARS - 1] = {3200, 2900, 2900, 3100, 2200, 2200, 2600, 2400}; //in um (gearDistances * 1000)
@@ -126,7 +126,7 @@ void setup() {
 
   stepper.begin(RPM);//currently set a little under stall conditions, can be set higher with better tuned spring balancer
   stepper.setSpeedProfile(stepper.CONSTANT_SPEED);  //no benefit to accel profiles
-  stepper.setEnableActiveState(LOW); //reverse logic, LOW enables the driver
+  //stepper.setEnableActiveState(HIGH); //if using sleep pin, HIGH enables the driver. if using not-enable pin, LOW enables the driver 
   disableMotor(); // custom function that disables 12V regulator and the driver
   //  digitalRead(BUTTON_PIN);
   //  delay(500);
@@ -227,12 +227,14 @@ void updateEEPROM(unsigned int address) {
 
 void enableMotor() {
   digitalWrite(TWELVEVOLTPOWER_PIN, HIGH);
+  digitalWrite(SLEEP_PIN, HIGH);
+  //stepper.enable();
   delay(5);
-  stepper.enable();
 }
 
 void disableMotor() {
-  stepper.disable();
+  //stepper.disable();
+  digitalWrite(SLEEP_PIN, LOW);
   digitalWrite(TWELVEVOLTPOWER_PIN, LOW);
   delay(5);
 }
@@ -538,4 +540,4 @@ void wakeUp_ISR() {
   detachInterrupt(digitalPinToInterrupt(UPBUTTON_PIN));
   detachInterrupt(digitalPinToInterrupt(DOWNBUTTON_PIN));
   sleep_disable();
-}
+}
